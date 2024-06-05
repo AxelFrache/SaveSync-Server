@@ -1,101 +1,165 @@
 package io.github.axelfrache.savesyncserver.controller;
 
-import io.github.axelfrache.savesyncserver.model.FileInfo;
-import io.github.axelfrache.savesyncserver.response.UploadResponse;
-import io.github.axelfrache.savesyncserver.service.FileStorageService;
-import io.github.axelfrache.savesyncserver.response.DeleteResponse;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestPart;
+import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.MvcUriComponentsBuilder;
 
-import java.io.File;
-import java.util.*;
-import java.util.stream.Collectors;
+import io.github.axelfrache.savesyncserver.model.FileInfo;
+import io.github.axelfrache.savesyncserver.model.Folder;
+import io.github.axelfrache.savesyncserver.repository.FileInfoRepository;
+import io.github.axelfrache.savesyncserver.repository.FolderRepository;
+import io.github.axelfrache.savesyncserver.response.DeleteResponse;
+import io.github.axelfrache.savesyncserver.response.UploadResponse;
+import io.github.axelfrache.savesyncserver.service.FileStorageService;
 
 @RestController
 @RequestMapping("/api/savesync")
 public class FileInfoController {
 
-    @Autowired
-    FileStorageService storageService;
+	@Autowired
+	FileStorageService storageService;
 
-    @PostMapping("/upload")
-    public ResponseEntity<List<UploadResponse>> uploadFiles(@RequestPart("files") MultipartFile[] files) {
-        String backupId = String.valueOf(System.currentTimeMillis());
-        String versionPath = "storage/" + backupId;
+	@Autowired
+	FolderRepository folderRepository;
 
-        List<UploadResponse> responses = new ArrayList<>();
-        for (MultipartFile file : files) {
-            try {
-                String filePath = versionPath + "/" + file.getOriginalFilename();
-                storageService.saveAll(file, filePath);
+	@Autowired
+	FileInfoRepository fileInfoRepository;
 
-                String downloadUrl = MvcUriComponentsBuilder
-                        .fromMethodName(FileInfoController.class, "getFile", filePath).build().toUri().toString();
+	@PostMapping("/upload")
+	public ResponseEntity<List<UploadResponse>> uploadFiles(@RequestPart("files") MultipartFile[] files,
+			@RequestParam(required = false) Long parentFolderId) {
+		String backupId = String.valueOf(System.currentTimeMillis());
+		Folder parentFolder = null;
 
-                responses.add(new UploadResponse(file.getOriginalFilename(), downloadUrl, file.getContentType(), file.getSize()));
-            } catch (Exception e) {
-                e.printStackTrace();
-                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
-            }
-        }
+		if (parentFolderId != null) {
+			parentFolder = folderRepository.findById(parentFolderId).orElse(null);
+		}
 
-        return ResponseEntity.ok(responses);
-    }
+		List<UploadResponse> responses = new ArrayList<>();
 
+		for (MultipartFile file : files) {
+			try {
+				String relativePath = backupId + "/" + file.getOriginalFilename();
+				storageService.saveAll(file, relativePath, parentFolder);
 
-    @GetMapping("/files")
-    public ResponseEntity<List<FileInfo>> getListFiles() {
-        List<FileInfo> fileInfos = storageService.readAll().map(path -> {
-            String fileName = path.getFileName().toString();
-            String url = MvcUriComponentsBuilder
-                    .fromMethodName(FileInfoController.class, "getFile", path.getFileName().toString()).build().toString();
+				String downloadUrl = MvcUriComponentsBuilder
+						.fromMethodName(FileInfoController.class, "getFile", relativePath).build().toUri().toString();
 
-            return new FileInfo(fileName, url);
-        }).collect(Collectors.toList());
+				responses.add(new UploadResponse(file.getOriginalFilename(), downloadUrl, file.getContentType(), file.getSize()));
+			} catch (Exception e) {
+				e.printStackTrace();
+				return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
+			}
+		}
 
-        return ResponseEntity.status(HttpStatus.OK).body(fileInfos);
-    }
+		return ResponseEntity.ok(responses);
+	}
 
-    @GetMapping("/files/{fileName:.+}")
-    public ResponseEntity<Resource> getFile(@PathVariable String fileName) {
-        Resource file = storageService.read(fileName);
-        return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + file.getFilename() + "\"").body(file);
-    }
+	@GetMapping("/files")
+	public ResponseEntity<List<FileInfo>> getListFiles(@RequestParam(required = false) Long parentFolderId) {
+		List<FileInfo> fileInfos;
+		if (parentFolderId == null) {
+			fileInfos = storageService.readAll().collect(Collectors.toList());
+		} else {
+			Folder parentFolder = folderRepository.findById(parentFolderId).orElse(null);
+			fileInfos = storageService.getFilesByParentFolder(parentFolder);
+		}
 
-    @DeleteMapping("/files/{fileName:.+}")
-    public ResponseEntity<DeleteResponse> deleteFile(@PathVariable String fileName) {
+		return ResponseEntity.status(HttpStatus.OK).body(fileInfos);
+	}
 
-        try {
-            boolean existed = storageService.delete(fileName);
+	@GetMapping("/files/{fileName:.+}")
+	public ResponseEntity<Resource> getFile(@PathVariable String fileName) {
+		Resource file = storageService.read(fileName);
+		return ResponseEntity.ok()
+				.header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + file.getFilename() + "\"").body(file);
+	}
 
-            if (existed) {
-                return ResponseEntity.status(HttpStatus.OK).body(new DeleteResponse("File " + fileName + " has been deleted successfully"));
-            }
+	@GetMapping("/backups")
+	public ResponseEntity<List<String>> getBackups() {
+		List<String> backups = fileInfoRepository.findAll()
+				.stream()
+				.map(FileInfo::getBackupId)
+				.distinct()
+				.collect(Collectors.toList());
+		System.out.println("Backups: " + backups); // Ajout de journalisation
+		return ResponseEntity.status(HttpStatus.OK).body(backups);
+	}
 
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(new DeleteResponse("File " + fileName + " not found"));
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(new DeleteResponse("Failed to delete " + fileName + ": " + e.getMessage()));
-        }
-    }
+	@GetMapping("/backups/{backupId}/files")
+	public ResponseEntity<List<String>> getBackupFiles(@PathVariable String backupId) {
+		List<String> backupFiles = fileInfoRepository.findAllByBackupId(backupId)
+				.stream()
+				.map(FileInfo::getFileName)
+				.collect(Collectors.toList());
+		System.out.println("Files in backup " + backupId + ": " + backupFiles); // Ajout de journalisation
+		return ResponseEntity.status(HttpStatus.OK).body(backupFiles);
+	}
 
-    @GetMapping("/backups")
-    public ResponseEntity<List<String>> getBackups() {
-        File storageDir = new File("storage/");
-        String[] backups = storageDir.list((current, name) -> new File(current, name).isDirectory());
+	@PostMapping("/files/delete")
+	public ResponseEntity<DeleteResponse> deleteFileFromBackup(@RequestParam String backupId, @RequestParam String filePath) {
+		try {
+			String decodedFileName = URLDecoder.decode(filePath, StandardCharsets.UTF_8);
+			System.out.println("Received request to delete file: " + decodedFileName + " from backup: " + backupId);
+			boolean existed = storageService.deleteFromBackup(backupId, decodedFileName);
+			System.out.println("Deletion status: " + existed);
 
-        if (backups != null) {
-            return ResponseEntity.ok(Arrays.asList(backups));
-        } else {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
-        }
-    }
+			if (existed) {
+				// Après la suppression réussie, actualisez la liste des fichiers pour cette sauvegarde
+				List<String> updatedBackupFiles = fileInfoRepository.findAllByBackupId(backupId)
+						.stream()
+						.map(FileInfo::getFileName)
+						.collect(Collectors.toList());
+				System.out.println("Updated files in backup " + backupId + ": " + updatedBackupFiles); // Journalisation de la liste mise à jour
 
+				return ResponseEntity.status(HttpStatus.OK)
+						.body(new DeleteResponse("File " + decodedFileName + " from backup " + backupId + " has been deleted successfully"));
+			}
+
+			return ResponseEntity.status(HttpStatus.NOT_FOUND)
+					.body(new DeleteResponse("File " + decodedFileName + " from backup " + backupId + " not found"));
+		} catch (Exception e) {
+			return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+					.body(new DeleteResponse("Failed to delete " + filePath + " from backup " + backupId + ": " + e.getMessage()));
+		}
+	}
+
+	@PostMapping("/backups/delete")
+	public ResponseEntity<DeleteResponse> deleteBackup(@RequestParam String backupId) {
+		try {
+			boolean existed = storageService.deleteBackup(backupId);
+
+			if (existed) {
+				return ResponseEntity.status(HttpStatus.OK).body(new DeleteResponse("Backup " + backupId + " has been deleted successfully"));
+			}
+
+			return ResponseEntity.status(HttpStatus.NOT_FOUND).body(new DeleteResponse("Backup " + backupId + " not found"));
+		} catch (Exception e) {
+			return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+					.body(new DeleteResponse("Failed to delete " + backupId + ": " + e.getMessage()));
+		}
+	}
+
+	@GetMapping("/backups/{version}")
+	public ResponseEntity<List<FileInfo>> getFilesFromBackup(@PathVariable String version) {
+		List<FileInfo> fileInfos = storageService.readAllFromVersion(version).collect(Collectors.toList());
+		return ResponseEntity.status(HttpStatus.OK).body(fileInfos);
+	}
 }

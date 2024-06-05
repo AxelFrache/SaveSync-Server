@@ -1,23 +1,34 @@
 package io.github.axelfrache.savesyncserver.service;
 
-import java.nio.file.Path;
+import java.util.List;
 import java.util.stream.Stream;
 
 import org.springframework.core.io.Resource;
 import org.springframework.web.multipart.MultipartFile;
 
+import io.github.axelfrache.savesyncserver.model.FileInfo;
+import io.github.axelfrache.savesyncserver.model.Folder;
+
 public interface FileStorageService {
-    void init();
+	void init();
 
-    void save(MultipartFile file);
+	void save(MultipartFile file);
 
-    Resource read(String fileName);
+	void saveAll(MultipartFile file, String relativePath, Folder parentFolder);
 
-    boolean delete(String fileName);
+	Resource read(String fileName);
 
-    void deleteAll();
+	boolean delete(String fileName);
 
-    Stream<Path> readAll();
+	boolean deleteFromBackup(String backupId, String fileName);
 
-    void saveAll(MultipartFile file, String relativePath);
+	void deleteAll();
+
+	Stream<FileInfo> readAll();
+
+	Stream<FileInfo> readAllFromVersion(String version);
+
+	boolean deleteBackup(String backupId);
+
+	List<FileInfo> getFilesByParentFolder(Folder parentFolder);
 }
